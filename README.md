@@ -5,6 +5,27 @@ A comprehensive MCP server that provides sophisticated tools for interacting wit
 
 <a href="https://glama.ai/mcp/servers/z2xjuegxxh"><img width="380" height="200" src="https://glama.ai/mcp/servers/z2xjuegxxh/badge" alt="pocketbase-mcp-server MCP server" /></a>
 
+## Changelog
+
+### v2.0.0 (April 2, 2025)
+
+#### Added
+- Enhanced admin authentication support with environment variables
+- Added support for admin impersonation via the `impersonate_user` tool
+- Improved error handling for authentication operations
+- Added comprehensive TypeScript type definitions for better development experience
+- Added support for Cline integration
+
+#### Fixed
+- Fixed TypeScript errors in the PocketBase client implementation
+- Improved schema field handling with proper type annotations
+- Fixed issues with optional schema field properties
+
+#### Changed
+- Updated the authentication flow to support multiple authentication methods
+- Improved documentation with more detailed examples
+- Enhanced environment variable configuration options
+
 
 ## Features
 
