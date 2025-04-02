@@ -296,6 +296,118 @@ class PocketBaseServer {
   }
 
   private setupTools() {
+    // Server info tool
+    this.server.tool(
+      'get_server_info',
+      {},
+      async () => {
+        try {
+          return {
+            content: [{ 
+              type: 'text', 
+              text: JSON.stringify({
+                url: this.pb.baseUrl,
+                isAuthenticated: this.pb.authStore?.isValid || false,
+                version: '0.1.0'
+              }, null, 2) 
+            }]
+          };
+        } catch (error: any) {
+          return {
+            content: [{ type: 'text', text: `Failed to get server info: ${error.message}` }],
+            isError: true
+          };
+        }
+      }
+    );
+
+    // Auth info tool
+    this.server.tool(
+      'get_auth_info',
+      {},
+      async () => {
+        try {
+          return {
+            content: [{ 
+              type: 'text', 
+              text: JSON.stringify({
+                isValid: this.pb.authStore.isValid,
+                token: this.pb.authStore.token,
+                model: this.pb.authStore.model
+              }, null, 2) 
+            }]
+          };
+        } catch (error: any) {
+          return {
+            content: [{ type: 'text', text: `Failed to get auth info: ${error.message}` }],
+            isError: true
+          };
+        }
+      }
+    );
+
+    // New tool to list all collections
+    this.server.tool(
+      'list_collections',
+      {
+        includeSystem: z.boolean().optional().default(false).describe('Whether to include system collections')
+      },
+      async ({ includeSystem }) => {
+        try {
+          // Try to get collections without authentication first
+          try {
+            const collections = await this.pb.collections.getList(1, 100);
+            const filteredCollections = includeSystem 
+              ? collections.items 
+              : collections.items.filter((c: any) => !c.system);
+            
+            return {
+              content: [{ 
+                type: 'text', 
+                text: JSON.stringify(filteredCollections.map((c: any) => ({
+                  id: c.id,
+                  name: c.name,
+                  type: c.type,
+                  system: c.system,
+                  recordCount: c.recordCount || 0
+                })), null, 2) 
+              }]
+            };
+          } catch (error: any) {
+            // If authentication is required, try to discover collections by testing common ones
+            // and by checking which ones are accessible
+            const commonCollections = ['users', 'products', 'posts', 'categories', 'orders', 'customers', 'items', 'files'];
+            const discoveredCollections = [];
+            
+            for (const collectionName of commonCollections) {
+              try {
+                // Try to list records in this collection
+                const result = await this.pb.collection(collectionName).getList(1, 1);
+                discoveredCollections.push({
+                  name: collectionName,
+                  recordCount: result.totalItems
+                });
+              } catch (e) {
+                // Skip collections that don't exist or require authentication
+              }
+            }
+            
+            return {
+              content: [{ 
+                type: 'text', 
+                text: JSON.stringify(discoveredCollections, null, 2) 
+              }]
+            };
+          }
+        } catch (error: any) {
+          return {
+            content: [{ type: 'text', text: `Failed to list collections: ${error.message}` }],
+            isError: true
+          };
+        }
+      }
+    );
+
     // Collection management tools
     this.server.tool(
       'create_collection',
@@ -692,6 +804,33 @@ class PocketBaseServer {
       }
     );
 
+    // Record tools
+    this.server.tool(
+      'get_record',
+      {
+        collection: z.string().describe('Collection name'),
+        id: z.string().describe('Record ID'),
+        expand: z.string().optional().describe('Relations to expand')
+      },
+      async ({ collection, id, expand }) => {
+        try {
+          const options: any = {};
+          if (expand) options.expand = expand;
+          
+          // @ts-ignore - PocketBase has this method but TypeScript doesn't know about it
+          const record = await this.pb.collection(collection).getOne(id, options);
+          return {
+            content: [{ type: 'text', text: JSON.stringify(record, null, 2) }]
+          };
+        } catch (error: any) {
+          return {
+            content: [{ type: 'text', text: `Failed to get record: ${error.message}` }],
+            isError: true
+          };
+        }
+      }
+    );
+
     // Collection schema tools
     this.server.tool(
       'get_collection_schema',
@@ -700,10 +839,44 @@ class PocketBaseServer {
       },
       async ({ collection }) => {
         try {
-          const result = await this.pb.collections.getOne(collection);
-          return {
-            content: [{ type: 'text', text: JSON.stringify(result.schema, null, 2) }]
-          };
+          try {
+            const result = await this.pb.collections.getOne(collection);
+            return {
+              content: [{ type: 'text', text: JSON.stringify(result.schema, null, 2) }]
+            };
+          } catch (error: any) {
+            if (error.message.includes("requires valid record authorization token")) {
+              // Try to discover schema by listing records
+              try {
+                const records = await this.pb.collection(collection).getList(1, 1);
+                if (records.items.length > 0) {
+                  const record = records.items[0];
+                  const schema = Object.keys(record).map(field => ({
+                    name: field,
+                    type: typeof record[field] === 'object' ? 'json' : typeof record[field],
+                    required: false
+                  }));
+                  return {
+                    content: [{ 
+                      type: 'text', 
+                      text: JSON.stringify(schema, null, 2) + "\n\nNote: This schema was inferred from record data since authentication is required to access the actual schema." 
+                    }]
+                  };
+                }
+              } catch (e) {
+                // Ignore errors from this attempt
+              }
+              
+              return {
+                content: [{ 
+                  type: 'text', 
+                  text: "Authentication is required to access the collection schema. Please authenticate using the 'authenticate_user' tool first." 
+                }],
+                isError: true
+              };
+            }
+            throw error;
+          }
         } catch (error: any) {
           return {
             content: [{ type: 'text', text: `Failed to get collection schema: ${error.message}` }],
