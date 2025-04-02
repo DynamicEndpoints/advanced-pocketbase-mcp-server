@@ -408,6 +408,28 @@ class PocketBaseServer {
       }
     );
 
+    // Record management tools
+    this.server.tool(
+      'create_record',
+      {
+        collection: z.string().describe('Collection name'),
+        data: z.record(z.any()).describe('Record data')
+      },
+      async ({ collection, data }) => {
+        try {
+          const result = await this.pb.collection(collection).create(data);
+          return {
+            content: [{ type: 'text', text: JSON.stringify(result, null, 2) }]
+          };
+        } catch (error: any) {
+          return {
+            content: [{ type: 'text', text: `Failed to create record: ${error.message}` }],
+            isError: true
+          };
+        }
+      }
+    );
+
     // Collection management tools
     this.server.tool(
       'create_collection',
