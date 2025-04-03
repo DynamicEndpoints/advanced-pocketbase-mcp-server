@@ -7,6 +7,17 @@ A comprehensive MCP server that provides sophisticated tools for interacting wit
 
 ## Changelog
 
+### v2.1.0 (April 3, 2025)
+
+#### Added
+- Added `batch_update_records` tool for updating multiple records at once.
+- Added `batch_delete_records` tool for deleting multiple records at once.
+- Added `subscribe_to_collection` tool for real-time event subscriptions (requires `eventsource` polyfill).
+
+#### Fixed
+- Corrected schema for `authenticate_user` to allow admin authentication via environment variables without explicit email/password.
+- Added `eventsource` dependency and polyfill to enable real-time subscriptions in Node.js.
+
 ### v2.0.0 (April 2, 2025)
 
 #### Added
@@ -71,6 +82,9 @@ A comprehensive MCP server that provides sophisticated tools for interacting wit
 - `update_record`: Update an existing record
 - `delete_record`: Delete a record
 - `query_collection`: Advanced query with filtering, sorting, and aggregation
+- `batch_update_records`: Update multiple records in a single call
+- `batch_delete_records`: Delete multiple records in a single call
+- `subscribe_to_collection`: Subscribe to real-time changes in a collection (requires `eventsource` package in Node.js environment)
 - `import_data`: Import data into a collection with create/update/upsert modes
 
 ### User Management
@@ -201,6 +215,36 @@ await mcp.use_tool("pocketbase", "migrate_collection", {
     // Optional field transformations during migration
     tags: "JSON.parse(oldTags)"
   }
+});
+```
+
+### Batch & Real-time Operations
+```typescript
+// Batch update records
+await mcp.use_tool("pocketbase", "batch_update_records", {
+  collection: "products",
+  records: [
+    { id: "record_id_1", data: { price: 19.99 } },
+    { id: "record_id_2", data: { status: "published" } }
+  ]
+});
+
+// Batch delete records
+await mcp.use_tool("pocketbase", "batch_delete_records", {
+  collection: "products",
+  recordIds: ["record_id_3", "record_id_4"]
+});
+
+// Subscribe to collection changes (logs events to server console)
+// Note: Requires 'eventsource' package installed in the Node.js environment running the server.
+await mcp.use_tool("pocketbase", "subscribe_to_collection", {
+  collection: "products"
+});
+
+// Subscribe to a specific record
+await mcp.use_tool("pocketbase", "subscribe_to_collection", {
+  collection: "products",
+  recordId: "specific_product_id"
 });
 ```
 

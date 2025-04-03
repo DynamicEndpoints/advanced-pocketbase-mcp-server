@@ -3,6 +3,11 @@ import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mc
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import PocketBase from 'pocketbase';
 import { z } from 'zod';
+import { EventSource } from 'eventsource'; // Import the polyfill using named import
+
+// Assign the polyfill to the global scope for PocketBase SDK to find
+// @ts-ignore - Need to assign to global scope
+global.EventSource = EventSource;
 
 // Define types for PocketBase
 interface CollectionModel {
@@ -79,6 +84,13 @@ interface InputSchemaField {
   required?: boolean;
   options?: Record<string, any>;
 }
+
+// Type for subscription event (adjust based on actual PocketBase SDK types if known)
+interface SubscriptionEvent {
+	action: string;
+	record: RecordModel;
+}
+
 
 class PocketBaseServer {
   private server: McpServer;
@@ -541,8 +553,9 @@ class PocketBaseServer {
     this.server.tool(
       'authenticate_user',
       {
-        email: z.string().describe('User email'),
-        password: z.string().describe('User password'),
+        // Make email and password optional to allow using env vars when isAdmin is true
+        email: z.string().optional().describe('User email (required unless isAdmin=true and env vars are set)'),
+        password: z.string().optional().describe('User password (required unless isAdmin=true and env vars are set)'),
         collection: z.string().optional().default('users').describe('Collection name'),
         isAdmin: z.boolean().optional().default(false).describe('Whether to authenticate as an admin')
       },
@@ -1337,6 +1350,125 @@ class PocketBaseServer {
         } catch (error: any) {
           return {
             content: [{ type: 'text', text: `Failed to manage auth store: ${error.message}` }],
+            isError: true
+          };
+        }
+      }
+    );
+
+    // Real-time subscription tool (Note: Streams data to server console, not back via MCP response)
+    this.server.tool(
+      'subscribe_to_collection',
+      {
+        collection: z.string().describe('Collection name to subscribe to'),
+        recordId: z.string().optional().describe('Specific record ID to subscribe to (optional)'),
+        filter: z.string().optional().describe('Filter expression for subscription (optional)')
+        // How to handle the callback/stream is tricky with MCP's request/response model.
+        // This implementation will log events to the server console.
+      },
+      async ({ collection, recordId, filter }) => {
+        try {
+          const subscribePath = recordId ? `${collection}/${recordId}` : collection;
+          console.error(`[MCP PocketBase] Subscribing to ${subscribePath}...`);
+
+          // The subscribe function takes a callback. We can't easily stream this back via MCP.
+          // We'll log events to the server's console instead.
+          // Also, managing unsubscription isn't straightforward in this model.
+          // Cast to 'any' to bypass TS error if the specific type isn't correctly inferred
+          await (this.pb.collection(collection) as any).subscribe(recordId || '*', (e: SubscriptionEvent) => {
+            console.error(`[MCP PocketBase Subscription Event - ${collection}/${recordId || '*'}] Action: ${e.action}, Record:`, JSON.stringify(e.record, null, 2));
+          }, { filter }); // Pass filter option if provided
+
+          return {
+            content: [{ type: 'text', text: `Successfully initiated subscription to collection '${collection}'${recordId ? ` for record '${recordId}'` : ''}. Events will be logged to the server console.` }]
+          };
+        } catch (error: any) {
+          console.error(`[MCP PocketBase] Subscription failed for ${collection}/${recordId || '*'}:`, error);
+          return {
+            content: [{ type: 'text', text: `Failed to subscribe to collection: ${error.message}` }],
+            isError: true
+          };
+        }
+      }
+    );
+
+    // Batch update tool
+    this.server.tool(
+      'batch_update_records',
+      {
+        collection: z.string().describe('Collection name'),
+        records: z.array(z.object({
+          id: z.string().describe('Record ID to update'),
+          data: z.record(z.any()).describe('Data to update')
+        })).describe('Array of records to update')
+      },
+      async ({ collection, records }) => {
+        const results: any[] = [];
+        const errors: any[] = [];
+        try {
+          for (const record of records) {
+            try {
+              const result = await this.pb.collection(collection).update(record.id, record.data);
+              results.push({ id: record.id, status: 'success', result });
+            } catch (error: any) {
+              errors.push({ id: record.id, status: 'error', message: error.message });
+            }
+          }
+
+          if (errors.length > 0) {
+            return {
+              content: [{ type: 'text', text: JSON.stringify({ updated: results, errors: errors }, null, 2) }],
+              isError: true // Indicate partial or full failure
+            };
+          }
+
+          return {
+            content: [{ type: 'text', text: JSON.stringify({ updated: results }, null, 2) }]
+          };
+        } catch (error: any) {
+          // Catch potential errors outside the loop (though less likely here)
+          return {
+            content: [{ type: 'text', text: `Failed during batch update: ${error.message}` }],
+            isError: true
+          };
+        }
+      }
+    );
+
+    // Batch delete tool
+    this.server.tool(
+      'batch_delete_records',
+      {
+        collection: z.string().describe('Collection name'),
+        recordIds: z.array(z.string()).describe('Array of Record IDs to delete')
+      },
+      async ({ collection, recordIds }) => {
+        const results: any[] = [];
+        const errors: any[] = [];
+        try {
+          for (const id of recordIds) {
+            try {
+              await this.pb.collection(collection).delete(id);
+              results.push({ id: id, status: 'success' });
+            } catch (error: any) {
+              errors.push({ id: id, status: 'error', message: error.message });
+            }
+          }
+
+          if (errors.length > 0) {
+            return {
+              content: [{ type: 'text', text: JSON.stringify({ deleted: results, errors: errors }, null, 2) }],
+              isError: true // Indicate partial or full failure
+            };
+          }
+
+          return {
+            content: [{ type: 'text', text: JSON.stringify({ deleted: results }, null, 2) }]
+          };
+        } catch (error: any) {
+          // Catch potential errors outside the loop
+          return {
+            content: [{ type: 'text', text: `Failed during batch delete: ${error.message}` }],
             isError: true
           };
         }
