@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import PocketBase from 'pocketbase'; // Remove incorrect Admin import
+import PocketBase from 'pocketbase';
 import { z } from 'zod';
 import { EventSource } from 'eventsource'; // Import the polyfill using named import
 
@@ -114,7 +114,7 @@ class PocketBaseServer {
     this.setupTools();
     this.setupResources();
     this.setupPrompts();
-    
+
     // Error handling
     process.on('SIGINT', async () => {
       process.exit(0);
@@ -316,13 +316,13 @@ class PocketBaseServer {
       async () => {
         try {
           return {
-            content: [{ 
-              type: 'text', 
+            content: [{
+              type: 'text',
               text: JSON.stringify({
                 url: this.pb.baseUrl,
                 isAuthenticated: this.pb.authStore?.isValid || false,
                 version: '0.1.0'
-              }, null, 2) 
+              }, null, 2)
             }]
           };
         } catch (error: any) {
@@ -341,13 +341,14 @@ class PocketBaseServer {
       async () => {
         try {
           return {
-            content: [{ 
-              type: 'text', 
+            content: [{
+              type: 'text',
               text: JSON.stringify({
                 isValid: this.pb.authStore.isValid,
                 token: this.pb.authStore.token,
-                model: this.pb.authStore.model
-              }, null, 2) 
+                model: this.pb.authStore.model,
+                isAdmin: this.pb.authStore.model?.collectionName === '_superusers'
+              }, null, 2)
             }]
           };
         } catch (error: any) {
@@ -370,20 +371,20 @@ class PocketBaseServer {
           // Try to get collections without authentication first
           try {
             const collections = await this.pb.collections.getList(1, 100);
-            const filteredCollections = includeSystem 
-              ? collections.items 
+            const filteredCollections = includeSystem
+              ? collections.items
               : collections.items.filter((c: any) => !c.system);
-            
+
             return {
-              content: [{ 
-                type: 'text', 
+              content: [{
+                type: 'text',
                 text: JSON.stringify(filteredCollections.map((c: any) => ({
                   id: c.id,
                   name: c.name,
                   type: c.type,
                   system: c.system,
                   recordCount: c.recordCount || 0
-                })), null, 2) 
+                })), null, 2)
               }]
             };
           } catch (error: any) {
@@ -391,7 +392,7 @@ class PocketBaseServer {
             // and by checking which ones are accessible
             const commonCollections = ['users', 'products', 'posts', 'categories', 'orders', 'customers', 'items', 'files'];
             const discoveredCollections = [];
-            
+
             for (const collectionName of commonCollections) {
               try {
                 // Try to list records in this collection
@@ -404,11 +405,11 @@ class PocketBaseServer {
                 // Skip collections that don't exist or require authentication
               }
             }
-            
+
             return {
-              content: [{ 
-                type: 'text', 
-                text: JSON.stringify(discoveredCollections, null, 2) 
+              content: [{
+                type: 'text',
+                text: JSON.stringify(discoveredCollections, null, 2)
               }]
             };
           }
@@ -456,8 +457,15 @@ class PocketBaseServer {
         })).describe('Collection schema')
       },
       async ({ name, schema }) => {
-        // Check for admin authentication using model property
-        if (!this.pb.authStore.model?.isAdmin) {
+        // Log authentication state for debugging
+        console.error(`[MCP PocketBase DEBUG] Auth state for create_collection:`, {
+          isValid: this.pb.authStore.isValid,
+          modelExists: !!this.pb.authStore.model,
+          collectionName: this.pb.authStore.model?.collectionName,
+        });
+
+        // Check for admin authentication by verifying the authenticated model's collection
+        if (!this.pb.authStore.isValid || this.pb.authStore.model?.collectionName !== '_superusers') {
           return {
             content: [{ type: 'text', text: 'Admin authentication required to create collections. Please use authenticate_user with isAdmin: true.' }],
             isError: true
@@ -469,7 +477,7 @@ class PocketBaseServer {
             ...field,
             required: field.required === undefined ? false : field.required
           }));
-          
+
           const result = await this.pb.collections.create({
             name,
             schema: processedSchema
@@ -572,18 +580,18 @@ class PocketBaseServer {
           const authCollection = isAdmin ? '_superusers' : collection;
           const authEmail = isAdmin && !email ? process.env.POCKETBASE_ADMIN_EMAIL : email;
           const authPassword = isAdmin && !password ? process.env.POCKETBASE_ADMIN_PASSWORD : password;
-          
+
           if (!authEmail || !authPassword) {
             return {
               content: [{ type: 'text', text: 'Email and password are required for authentication' }],
               isError: true
             };
           }
-          
+
           const authData = await this.pb
             .collection(authCollection)
             .authWithPassword(authEmail, authPassword);
-          
+
           return {
             content: [{ type: 'text', text: JSON.stringify(authData, null, 2) }]
           };
@@ -610,7 +618,7 @@ class PocketBaseServer {
           const authData = await this.pb
             .collection(collection)
             .authWithOAuth2(provider, code, codeVerifier, redirectUrl);
-          
+
           return {
             content: [{ type: 'text', text: JSON.stringify(authData, null, 2) }]
           };
@@ -859,7 +867,7 @@ class PocketBaseServer {
         try {
           const options: any = {};
           if (expand) options.expand = expand;
-          
+
           // @ts-ignore - PocketBase has this method but TypeScript doesn't know about it
           const record = await this.pb.collection(collection).getOne(id, options);
           return {
@@ -938,8 +946,15 @@ class PocketBaseServer {
         })).optional().describe('Fields to update')
       },
       async ({ collection, addFields = [], removeFields = [], updateFields = [] }) => {
-        // Check for admin authentication using model property
-        if (!this.pb.authStore.model?.isAdmin) {
+        // Log authentication state for debugging
+        console.error(`[MCP PocketBase DEBUG] Auth state for update_collection_schema:`, {
+          isValid: this.pb.authStore.isValid,
+          modelExists: !!this.pb.authStore.model,
+          collectionName: this.pb.authStore.model?.collectionName,
+        });
+
+        // Check for admin authentication by verifying the authenticated model's collection
+        if (!this.pb.authStore.isValid || this.pb.authStore.model?.collectionName !== '_superusers') {
           return {
             content: [{ type: 'text', text: 'Admin authentication required to update collection schema. Please use authenticate_user with isAdmin: true.' }],
             isError: true
@@ -1004,8 +1019,15 @@ class PocketBaseServer {
         collection: z.string().describe('Collection name or ID')
       },
       async ({ collection }) => {
-        // Check for admin authentication using model property
-        if (!this.pb.authStore.model?.isAdmin) {
+        // Log authentication state for debugging
+        console.error(`[MCP PocketBase DEBUG] Auth state for get_collection_schema:`, {
+          isValid: this.pb.authStore.isValid,
+          modelExists: !!this.pb.authStore.model,
+          collectionName: this.pb.authStore.model?.collectionName,
+        });
+
+        // Check for admin authentication by verifying the authenticated model's collection
+        if (!this.pb.authStore.isValid || this.pb.authStore.model?.collectionName !== '_superusers') {
           // If not admin, attempt the fallback schema inference directly
           try {
             const records = await this.pb.collection(collection).getList(1, 1, { $autoCancel: false });
@@ -1092,8 +1114,6 @@ class PocketBaseServer {
         }
       }
     );
-
-    // Collection schema tools (This comment seems redundant now, removing)
 
     // Database management tools
     this.server.tool(
@@ -1218,7 +1238,7 @@ class PocketBaseServer {
             ...field,
             required: field.required === undefined ? false : field.required
           }));
-          
+
           await this.pb.collections.create({
             name: tempName,
             schema: processedSchema,
@@ -1285,14 +1305,14 @@ class PocketBaseServer {
             for (const [name, expr] of Object.entries(aggregate)) {
               const [func, field] = expr.split('(');
               const cleanField = field.replace(')', '');
-              
+
               switch (func) {
                 case 'sum':
-                  aggregations[name] = records.items.reduce((sum: number, record: any) => 
+                  aggregations[name] = records.items.reduce((sum: number, record: any) =>
                     sum + (parseFloat(record[cleanField]) || 0), 0);
                   break;
                 case 'avg':
-                  aggregations[name] = records.items.reduce((sum: number, record: any) => 
+                  aggregations[name] = records.items.reduce((sum: number, record: any) =>
                     sum + (parseFloat(record[cleanField]) || 0), 0) / records.items.length;
                   break;
                 case 'count':
@@ -1402,10 +1422,10 @@ class PocketBaseServer {
         try {
           const binaryData = Buffer.from(fileData.content, 'base64');
           const blob = new Blob([binaryData], { type: fileData.type || 'application/octet-stream' });
-          
+
           const formData = new FormData();
           formData.append(fileData.name, blob, fileData.name);
-          
+
           Object.entries(additionalFields).forEach(([key, value]) => {
             formData.append(key, value as string);
           });
