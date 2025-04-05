@@ -48,7 +48,7 @@ interface RequestHandlerExtra {
 // Extend PocketBase types
 interface ExtendedPocketBase extends PocketBase {
   baseUrl: string;
-  authStore: {
+  authStore: { // Restore explicit authStore definition
     isValid: boolean;
     token: string;
     model: any;
@@ -57,6 +57,7 @@ interface ExtendedPocketBase extends PocketBase {
     exportToCookie(options?: any): string;
     loadFromCookie(cookie: string): void;
   };
+  admins: any; // Add admins collection service type (using 'any' for simplicity)
   collections: {
     getList(page?: number, perPage?: number, options?: any): Promise<any>;
     getOne(id: string): Promise<any>;
@@ -471,7 +472,7 @@ class PocketBaseServer {
           };
         } catch (error: any) {
           return {
-            content: [{ type: 'text', text: `Failed to create record: ${error.message}` }],
+            content: [{ type: 'text', text: `Failed to create collection: ${error.message}` }],
             isError: true
           };
         }
@@ -866,53 +867,174 @@ class PocketBaseServer {
       }
     );
 
-    // Collection schema tools
+    // Tool to set collection access rules
+    this.server.tool(
+      'set_collection_rules',
+      {
+        collection: z.string().describe('Collection name or ID'),
+        listRule: z.string().nullable().optional().describe('List rule (PocketBase filter syntax or null)'),
+        viewRule: z.string().nullable().optional().describe('View rule (PocketBase filter syntax or null)'),
+        createRule: z.string().nullable().optional().describe('Create rule (PocketBase filter syntax or null)'),
+        updateRule: z.string().nullable().optional().describe('Update rule (PocketBase filter syntax or null)'),
+        deleteRule: z.string().nullable().optional().describe('Delete rule (PocketBase filter syntax or null)')
+      },
+      async ({ collection, listRule, viewRule, createRule, updateRule, deleteRule }) => {
+        try {
+          // Construct the update payload, only including rules that were provided
+          const payload: Record<string, string | null> = {};
+          if (listRule !== undefined) payload.listRule = listRule;
+          if (viewRule !== undefined) payload.viewRule = viewRule;
+          if (createRule !== undefined) payload.createRule = createRule;
+          if (updateRule !== undefined) payload.updateRule = updateRule;
+          if (deleteRule !== undefined) payload.deleteRule = deleteRule;
+
+          if (Object.keys(payload).length === 0) {
+             return {
+               content: [{ type: 'text', text: 'No rules provided to update.' }],
+               isError: true
+             };
+          }
+
+          // Updating rules typically requires admin privileges
+          const result = await this.pb.collections.update(collection, payload);
+          return {
+            content: [{ type: 'text', text: JSON.stringify(result, null, 2) }]
+          };
+        } catch (error: any) {
+          // Catch permission errors or other issues
+          return {
+            content: [{ type: 'text', text: `Failed to set collection rules: ${error.message}` }],
+            isError: true
+          };
+        }
+      }
+    );
+
+    // Tool to update collection schema (add/remove/update fields)
+    this.server.tool(
+      'update_collection_schema',
+      {
+        collection: z.string().describe('Collection name or ID'),
+        addFields: z.array(z.object({
+          name: z.string(),
+          type: z.string(),
+          required: z.boolean().optional().default(false),
+          options: z.record(z.any()).optional()
+        })).optional().describe('Fields to add'),
+        removeFields: z.array(z.string()).optional().describe('Names of fields to remove'),
+        updateFields: z.array(z.object({
+          name: z.string().describe('Name of the field to update'),
+          newName: z.string().optional().describe('Optional new name for the field'),
+          type: z.string().optional().describe('Optional new type'),
+          required: z.boolean().optional().describe('Optional new required status'),
+          options: z.record(z.any()).optional().describe('Optional new options')
+        })).optional().describe('Fields to update')
+      },
+      async ({ collection, addFields = [], removeFields = [], updateFields = [] }) => {
+        try {
+          // Fetch the current collection details including schema
+          const currentCollection = await this.pb.collections.getOne(collection);
+          let currentSchema: SchemaField[] = currentCollection.schema || [];
+
+          // Process removals first
+          if (removeFields.length > 0) {
+            currentSchema = currentSchema.filter(field => !removeFields.includes(field.name));
+          }
+
+          // Process updates
+          if (updateFields.length > 0) {
+            currentSchema = currentSchema.map(field => {
+              const updateInfo = updateFields.find(uf => uf.name === field.name);
+              if (updateInfo) {
+                return {
+                  ...field,
+                  name: updateInfo.newName ?? field.name, // Update name if provided
+                  type: updateInfo.type ?? field.type, // Update type if provided
+                  required: updateInfo.required ?? field.required, // Update required status if provided
+                  options: updateInfo.options ?? field.options // Update options if provided
+                };
+              }
+              return field;
+            });
+          }
+
+          // Process additions
+          if (addFields.length > 0) {
+             const processedAddFields = addFields.map(field => ({
+               ...field,
+               required: field.required ?? false // Ensure required has a default
+             }));
+            currentSchema = [...currentSchema, ...processedAddFields];
+          }
+
+          // Update the collection with the modified schema
+          // Note: This replaces the entire schema. Requires admin privileges.
+          const result = await this.pb.collections.update(collection, { schema: currentSchema });
+          return {
+            content: [{ type: 'text', text: JSON.stringify(result, null, 2) }]
+          };
+
+        } catch (error: any) {
+          return {
+            content: [{ type: 'text', text: `Failed to update collection schema: ${error.message}` }],
+            isError: true
+          };
+        }
+      }
+    );
+
+    // Tool to get collection schema (duplicates resource functionality for tool access)
     this.server.tool(
       'get_collection_schema',
       {
-        collection: z.string().describe('Collection name')
+        collection: z.string().describe('Collection name or ID')
       },
       async ({ collection }) => {
         try {
-          try {
-            const result = await this.pb.collections.getOne(collection);
-            return {
-              content: [{ type: 'text', text: JSON.stringify(result.schema, null, 2) }]
-            };
-          } catch (error: any) {
-            if (error.message.includes("requires valid record authorization token")) {
-              // Try to discover schema by listing records
-              try {
-                const records = await this.pb.collection(collection).getList(1, 1);
-                if (records.items.length > 0) {
-                  const record = records.items[0];
-                  const schema = Object.keys(record).map(field => ({
+          // First, try the direct SDK call
+          const collectionData = await this.pb.collections.getOne(collection);
+          return {
+            content: [{ type: 'text', text: JSON.stringify(collectionData.schema || [], null, 2) }]
+          };
+        } catch (error: any) {
+          // If direct access fails due to auth, try inferring from a record
+          if (error.status === 403 || error.status === 401 || (error.message && (error.message.includes("authorization") || error.message.includes("permission")))) {
+            try {
+              const records = await this.pb.collection(collection).getList(1, 1, { $autoCancel: false }); // Use different request key potentially
+              if (records.items.length > 0) {
+                const record = records.items[0];
+                // Basic inference logic (might not capture all details like options, required status accurately)
+                const inferredSchema = Object.keys(record)
+                  .filter(key => !['id', 'created', 'updated', 'collectionId', 'collectionName', 'expand'].includes(key)) // Filter out common system fields
+                  .map(field => ({
                     name: field,
-                    type: typeof record[field] === 'object' ? 'json' : typeof record[field],
-                    required: false
+                    type: typeof record[field] === 'object' ? 'json' : typeof record[field], // Basic type detection
+                    required: false, // Cannot reliably infer required status
+                    system: false, // Assume not system field
+                    options: {} // Cannot infer options
                   }));
-                  return {
-                    content: [{ 
-                      type: 'text', 
-                      text: JSON.stringify(schema, null, 2) + "\n\nNote: This schema was inferred from record data since authentication is required to access the actual schema." 
-                    }]
-                  };
-                }
-              } catch (e) {
-                // Ignore errors from this attempt
+                return {
+                  content: [{
+                    type: 'text',
+                    text: JSON.stringify(inferredSchema, null, 2) + "\n\nNote: This schema was inferred from record data as direct schema access failed (likely due to permissions). Details like 'required' status or field options might be inaccurate."
+                  }]
+                };
+              } else {
+                 // If no records, we can't infer
+                 return {
+                   content: [{ type: 'text', text: `Failed to get collection schema: ${error.message}. Attempted inference failed as the collection appears empty.` }],
+                   isError: true
+                 };
               }
-              
+            } catch (inferenceError: any) {
+              // If inference also fails, return the original error plus inference error
               return {
-                content: [{ 
-                  type: 'text', 
-                  text: "Authentication is required to access the collection schema. Please authenticate using the 'authenticate_user' tool first." 
-                }],
+                content: [{ type: 'text', text: `Failed to get collection schema: ${error.message}. Attempted inference also failed: ${inferenceError.message}` }],
                 isError: true
               };
             }
-            throw error;
           }
-        } catch (error: any) {
+          // If it's a different error (e.g., collection not found), return that
           return {
             content: [{ type: 'text', text: `Failed to get collection schema: ${error.message}` }],
             isError: true
@@ -920,6 +1042,8 @@ class PocketBaseServer {
         }
       }
     );
+
+    // Collection schema tools (This comment seems redundant now, removing)
 
     // Database management tools
     this.server.tool(
@@ -1037,6 +1161,7 @@ class PocketBaseServer {
       },
       async ({ collection, newSchema, dataTransforms }) => {
         try {
+          console.error(`[MCP PocketBase WARNING] Executing 'migrate_collection' for '${collection}'. This tool is risky! It deletes the original collection before migration is fully complete. Backup your data first.`);
           const tempName = `${collection}_migration_${Date.now()}`;
           // Convert schema to ensure required is always defined
           const processedSchema = newSchema.map(field => ({
@@ -1074,7 +1199,7 @@ class PocketBaseServer {
           });
 
           return {
-            content: [{ type: 'text', text: JSON.stringify(renamedCollection, null, 2) }]
+            content: [{ type: 'text', text: JSON.stringify(renamedCollection, null, 2) + "\n\nWARNING: Migration completed, but this tool's process involves deleting the original collection before renaming the new one, which carries a risk of data loss if errors occur during the final steps. Ensure you have backups." }]
           };
         } catch (error: any) {
           return {
@@ -1485,3 +1610,4 @@ class PocketBaseServer {
 
 const server = new PocketBaseServer();
 server.run().catch(console.error);
+
