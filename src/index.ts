@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import PocketBase from 'pocketbase';
+import PocketBase from 'pocketbase'; // Remove incorrect Admin import
 import { z } from 'zod';
 import { EventSource } from 'eventsource'; // Import the polyfill using named import
 
@@ -456,6 +456,13 @@ class PocketBaseServer {
         })).describe('Collection schema')
       },
       async ({ name, schema }) => {
+        // Check for admin authentication using model property
+        if (!this.pb.authStore.model?.isAdmin) {
+          return {
+            content: [{ type: 'text', text: 'Admin authentication required to create collections. Please use authenticate_user with isAdmin: true.' }],
+            isError: true
+          };
+        }
         try {
           // Convert schema to ensure required is always defined
           const processedSchema = schema.map(field => ({
@@ -931,6 +938,13 @@ class PocketBaseServer {
         })).optional().describe('Fields to update')
       },
       async ({ collection, addFields = [], removeFields = [], updateFields = [] }) => {
+        // Check for admin authentication using model property
+        if (!this.pb.authStore.model?.isAdmin) {
+          return {
+            content: [{ type: 'text', text: 'Admin authentication required to update collection schema. Please use authenticate_user with isAdmin: true.' }],
+            isError: true
+          };
+        }
         try {
           // Fetch the current collection details including schema
           const currentCollection = await this.pb.collections.getOne(collection);
@@ -990,8 +1004,44 @@ class PocketBaseServer {
         collection: z.string().describe('Collection name or ID')
       },
       async ({ collection }) => {
+        // Check for admin authentication using model property
+        if (!this.pb.authStore.model?.isAdmin) {
+          // If not admin, attempt the fallback schema inference directly
+          try {
+            const records = await this.pb.collection(collection).getList(1, 1, { $autoCancel: false });
+            if (records.items.length > 0) {
+              const record = records.items[0];
+              const inferredSchema = Object.keys(record)
+                .filter(key => !['id', 'created', 'updated', 'collectionId', 'collectionName', 'expand'].includes(key))
+                .map(field => ({
+                  name: field,
+                  type: typeof record[field] === 'object' ? 'json' : typeof record[field],
+                  required: false,
+                  system: false,
+                  options: {}
+                }));
+              return {
+                content: [{
+                  type: 'text',
+                  text: JSON.stringify(inferredSchema, null, 2) + "\n\nNote: This schema was inferred from record data as admin authentication is required for direct schema access. Details like 'required' status or field options might be inaccurate."
+                }]
+              };
+            } else {
+              return {
+                content: [{ type: 'text', text: `Could not infer schema for collection '${collection}'. No records found or collection is inaccessible.` }],
+                isError: true
+              };
+            }
+          } catch (e: any) {
+            return {
+              content: [{ type: 'text', text: `Failed to get or infer schema for collection '${collection}': ${e.message}. Admin authentication might be required.` }],
+              isError: true
+            };
+          }
+        }
+
+        // If authenticated as admin, proceed with direct access
         try {
-          // First, try the direct SDK call
           const collectionData = await this.pb.collections.getOne(collection);
           return {
             content: [{ type: 'text', text: JSON.stringify(collectionData.schema || [], null, 2) }]
@@ -1610,4 +1660,3 @@ class PocketBaseServer {
 
 const server = new PocketBaseServer();
 server.run().catch(console.error);
-
