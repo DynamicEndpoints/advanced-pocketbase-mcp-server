@@ -4,6 +4,10 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import PocketBase from 'pocketbase';
 import { z } from 'zod';
 import { EventSource } from 'eventsource'; // Import the polyfill using named import
+import dotenv from 'dotenv'; // Import dotenv for loading .env file
+
+// Load environment variables from .env file
+dotenv.config();
 
 // Assign the polyfill to the global scope for PocketBase SDK to find
 // @ts-ignore - Need to assign to global scope
@@ -486,6 +490,7 @@ class PocketBaseServer {
             content: [{ type: 'text', text: JSON.stringify(result, null, 2) }]
           };
         } catch (error: any) {
+          console.error('[MCP DEBUG] create_collection raw error:', error); // Ensure log is present
           return {
             content: [{ type: 'text', text: `Failed to create collection: ${error.message}` }],
             isError: true
@@ -946,20 +951,6 @@ class PocketBaseServer {
         })).optional().describe('Fields to update')
       },
       async ({ collection, addFields = [], removeFields = [], updateFields = [] }) => {
-        // Log authentication state for debugging
-        console.error(`[MCP PocketBase DEBUG] Auth state for update_collection_schema:`, {
-          isValid: this.pb.authStore.isValid,
-          modelExists: !!this.pb.authStore.model,
-          collectionName: this.pb.authStore.model?.collectionName,
-        });
-
-        // Check for admin authentication by verifying the authenticated model's collection
-        if (!this.pb.authStore.isValid || this.pb.authStore.model?.collectionName !== '_superusers') {
-          return {
-            content: [{ type: 'text', text: 'Admin authentication required to update collection schema. Please use authenticate_user with isAdmin: true.' }],
-            isError: true
-          };
-        }
         try {
           // Fetch the current collection details including schema
           const currentCollection = await this.pb.collections.getOne(collection);
@@ -1019,56 +1010,16 @@ class PocketBaseServer {
         collection: z.string().describe('Collection name or ID')
       },
       async ({ collection }) => {
-        // Log authentication state for debugging
-        console.error(`[MCP PocketBase DEBUG] Auth state for get_collection_schema:`, {
-          isValid: this.pb.authStore.isValid,
-          modelExists: !!this.pb.authStore.model,
-          collectionName: this.pb.authStore.model?.collectionName,
-        });
-
-        // Check for admin authentication by verifying the authenticated model's collection
-        if (!this.pb.authStore.isValid || this.pb.authStore.model?.collectionName !== '_superusers') {
-          // If not admin, attempt the fallback schema inference directly
-          try {
-            const records = await this.pb.collection(collection).getList(1, 1, { $autoCancel: false });
-            if (records.items.length > 0) {
-              const record = records.items[0];
-              const inferredSchema = Object.keys(record)
-                .filter(key => !['id', 'created', 'updated', 'collectionId', 'collectionName', 'expand'].includes(key))
-                .map(field => ({
-                  name: field,
-                  type: typeof record[field] === 'object' ? 'json' : typeof record[field],
-                  required: false,
-                  system: false,
-                  options: {}
-                }));
-              return {
-                content: [{
-                  type: 'text',
-                  text: JSON.stringify(inferredSchema, null, 2) + "\n\nNote: This schema was inferred from record data as admin authentication is required for direct schema access. Details like 'required' status or field options might be inaccurate."
-                }]
-              };
-            } else {
-              return {
-                content: [{ type: 'text', text: `Could not infer schema for collection '${collection}'. No records found or collection is inaccessible.` }],
-                isError: true
-              };
-            }
-          } catch (e: any) {
-            return {
-              content: [{ type: 'text', text: `Failed to get or infer schema for collection '${collection}': ${e.message}. Admin authentication might be required.` }],
-              isError: true
-            };
-          }
-        }
-
-        // If authenticated as admin, proceed with direct access
         try {
+          // First, try the direct SDK call
           const collectionData = await this.pb.collections.getOne(collection);
+          console.log('[MCP DEBUG] get_collection_schema raw response:', JSON.stringify(collectionData, null, 2)); // Ensure log is present
+          // Ensure || [] fallback is removed below
           return {
-            content: [{ type: 'text', text: JSON.stringify(collectionData.schema || [], null, 2) }]
+            content: [{ type: 'text', text: JSON.stringify(collectionData.schema, null, 2) }]
           };
         } catch (error: any) {
+          console.error('[MCP DEBUG] get_collection_schema raw error:', error); // Ensure log is present
           // If direct access fails due to auth, try inferring from a record
           if (error.status === 403 || error.status === 401 || (error.message && (error.message.includes("authorization") || error.message.includes("permission")))) {
             try {
@@ -1099,6 +1050,7 @@ class PocketBaseServer {
                  };
               }
             } catch (inferenceError: any) {
+              console.error('[MCP DEBUG] get_collection_schema inference error:', inferenceError); // Ensure log is present
               // If inference also fails, return the original error plus inference error
               return {
                 content: [{ type: 'text', text: `Failed to get collection schema: ${error.message}. Attempted inference also failed: ${inferenceError.message}` }],
